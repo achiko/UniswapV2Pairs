@@ -18,7 +18,6 @@ import (
 	"time"
 	ERC20 "uniswap-go/Uniswap/Tokens"
 	"uniswap-go/Uniswap/UniswapV2/UniswapV2Factory"
-	"uniswap-go/Uniswap/UniswapV2/UniswapV2Pair"
 )
 
 type pairFlat struct {
@@ -52,39 +51,43 @@ var wg = sync.WaitGroup{}
 
 func main() {
 
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
-		Password: "",
-		DB:       0,
-	})
-	_ = rdb
+	pairFetcher()
 
-	client, err := ethclient.Dial(getENV("RPC_WS"))
-	if err != nil {
-		log.Fatal(err)
-	}
-	_ = client
+	// Commented does not work properly events does not come
 
-	// factory, err := UniswapV2Factory.NewUniswapV2Factory(common.HexToAddress(dex.factoryAddress), client)
-
-	paiAddress := common.HexToAddress("0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc")
-	pairContract, err := UniswapV2Pair.NewUniswapV2Pair(paiAddress, client)
-	watchOpts := &bind.WatchOpts{Context: context.Background()}
-
-	channel := make(chan *UniswapV2Pair.UniswapV2PairSync)
-
-	go func() {
-		sub, err := pairContract.WatchSync(watchOpts, channel)
-		if err != nil {
-			fmt.Println(err)
-		}
-		defer sub.Unsubscribe()
-	}()
-
-	// Receive events from the channel
-	event := <-channel
-
-	fmt.Println("Event :", time.Now(), event.Reserve0, event.Reserve1)
+	//rdb := redis.NewClient(&redis.Options{
+	//	Addr:     "localhost:6379",
+	//	Password: "",
+	//	DB:       0,
+	//})
+	//_ = rdb
+	//
+	//client, err := ethclient.Dial(getENV("RPC_WS"))
+	//if err != nil {
+	//	log.Fatal(err)
+	//}
+	//_ = client
+	//
+	//// factory, err := UniswapV2Factory.NewUniswapV2Factory(common.HexToAddress(dex.factoryAddress), client)
+	//
+	//paiAddress := common.HexToAddress("0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc")
+	//pairContract, err := UniswapV2Pair.NewUniswapV2Pair(paiAddress, client)
+	//watchOpts := &bind.WatchOpts{Context: context.Background()}
+	//
+	//channel := make(chan *UniswapV2Pair.UniswapV2PairSync)
+	//
+	//go func() {
+	//	sub, err := pairContract.WatchSync(watchOpts, channel)
+	//	if err != nil {
+	//		fmt.Println(err)
+	//	}
+	//	defer sub.Unsubscribe()
+	//}()
+	//
+	//// Receive events from the channel
+	//event := <-channel
+	//
+	//fmt.Println("Event :", time.Now(), event.Reserve0, event.Reserve1)
 
 }
 
@@ -131,9 +134,6 @@ func pairFetcher() {
 
 		_startBlock := startBlock + pageSize*_p
 		_endBlock := startBlock + pageSize*(_p+1)
-
-		//pairChannel := make(chan PairsResult, 100)
-		//_ = pairChannel
 
 		go fetchPairs(dex, _startBlock, &_endBlock, client, rdb)
 	}
