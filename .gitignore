@@ -14,6 +14,8 @@
 # Dependency directories (remove the comment below to include it)
 # vendor/
 .env
+.DS_Store
+.idea
 
-
-./docker/data
+#docker volumes
+/docker/data
