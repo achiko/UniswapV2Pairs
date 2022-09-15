@@ -3,111 +3,148 @@ package main
 import (
 	"context"
 	"fmt"
-	_ "github.com/ethereum/go-ethereum"
-	_ "github.com/ethereum/go-ethereum/accounts/abi"
-	"github.com/ethereum/go-ethereum/accounts/abi/bind"
-	_ "github.com/ethereum/go-ethereum/accounts/abi/bind"
-	"github.com/ethereum/go-ethereum/common"
-	_ "github.com/ethereum/go-ethereum/common"
-	_ "github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/ethclient"
-	_ "github.com/ethereum/go-ethereum/ethclient"
-	"github.com/go-redis/redis/v8"
 	"log"
+	"os"
 	"sync"
 	"time"
-	ERC20 "uniswap-go/Uniswap/Tokens"
 	"uniswap-go/Uniswap/UniswapV2/UniswapV2Factory"
+	"uniswap-go/Uniswap/UniswapV2/UniswapV2Pair"
+
+	ERC20 "uniswap-go/Uniswap/Tokens"
+
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/go-redis/redis/v8"
+	"github.com/joho/godotenv"
 )
 
-type pairFlat struct {
-	PairAddress    string
-	Token0Address  string
-	Token1Address  string
-	Token0Decimals uint8
-	Token1Decimals uint8
-	Token0Symbol   string
-	Token1Symbol   string
-}
+type (
+	pairFlat struct {
+		PairAddress    string
+		Token0Address  string
+		Token1Address  string
+		Token0Decimals uint8
+		Token1Decimals uint8
+		Token0Symbol   string
+		Token1Symbol   string
+	}
 
-type Token struct {
-	Address  common.Address
-	Symbol   string
-	Decimals uint8
-}
+	Token struct {
+		Address  common.Address
+		Symbol   string
+		Decimals uint8
+	}
 
-type Pair struct {
-	Address common.Address
-	Token0  Token
-	Token1  Token
-}
+	Pair struct {
+		Address common.Address
+		Token0  Token
+		Token1  Token
+	}
 
-type PairsResult struct {
-	ErrorName  string
-	PairsCount int
-}
+	PairsResult struct {
+		ErrorName  string
+		PairsCount int
+	}
+)
 
-var wg = sync.WaitGroup{}
+var (
+	wg  = sync.WaitGroup{}
+	rdb *redis.Client
+)
+
+const (
+	USDC_WETH_PAIR = "0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc"
+)
 
 func main() {
+	ctx := context.Background()
 
-	pairFetcher()
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal("Error loading .env file")
+	}
 
-	// Commented does not work properly events does not come
+	rdb = redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "",
+		DB:       0,
+	})
 
-	//rdb := redis.NewClient(&redis.Options{
-	//	Addr:     "localhost:6379",
-	//	Password: "",
-	//	DB:       0,
-	//})
-	//_ = rdb
-	//
-	//client, err := ethclient.Dial(getENV("RPC_WS"))
-	//if err != nil {
-	//	log.Fatal(err)
-	//}
-	//_ = client
-	//
-	//// factory, err := UniswapV2Factory.NewUniswapV2Factory(common.HexToAddress(dex.factoryAddress), client)
-	//
-	//paiAddress := common.HexToAddress("0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc")
-	//pairContract, err := UniswapV2Pair.NewUniswapV2Pair(paiAddress, client)
-	//watchOpts := &bind.WatchOpts{Context: context.Background()}
-	//
-	//channel := make(chan *UniswapV2Pair.UniswapV2PairSync)
-	//
-	//go func() {
-	//	sub, err := pairContract.WatchSync(watchOpts, channel)
-	//	if err != nil {
-	//		fmt.Println(err)
-	//	}
-	//	defer sub.Unsubscribe()
-	//}()
-	//
-	//// Receive events from the channel
-	//event := <-channel
-	//
-	//fmt.Println("Event :", time.Now(), event.Reserve0, event.Reserve1)
+	ethWSClient, err := ethclient.DialContext(ctx, os.Getenv("RPC_WS"))
+	if err != nil {
+		log.Fatal(err)
+	}
 
+	usdcWethPairC, err := NewUniV2PairContract(USDC_WETH_PAIR, ethWSClient)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// factory, err := UniswapV2Factory.NewUniswapV2Factory(common.HexToAddress(dex.factoryAddress), client)
+
+	syncEventChan := make(chan *UniswapV2Pair.UniswapV2PairSync)
+
+	go StartSubscribeUniV2PairSyncEvent(ctx, usdcWethPairC, syncEventChan)
+
+	// NOTE: Blocking here
+	if err := HandleAllEventChan(ctx, syncEventChan); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func NewUniV2PairContract(pairAddress string, client *ethclient.Client) (*UniswapV2Pair.UniswapV2Pair, error) {
+	paiAddress := common.HexToAddress(pairAddress)
+
+	c, err := UniswapV2Pair.NewUniswapV2Pair(paiAddress, client)
+	if err != nil {
+		return nil, err
+	}
+
+	return c, nil
+}
+
+func StartSubscribeUniV2PairSyncEvent(ctx context.Context, c *UniswapV2Pair.UniswapV2Pair, eventChan chan<- *UniswapV2Pair.UniswapV2PairSync) {
+	var start *uint64 = nil
+	opt := &bind.WatchOpts{Context: ctx, Start: start}
+
+	sub, err := c.WatchSync(opt, eventChan)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer sub.Unsubscribe()
+
+	if err := <-sub.Err(); err != nil {
+		fmt.Printf("[ERROR]: StartSubscribeUniV2PairSyncEvent: %s", err)
+	}
+}
+
+// HACK: You can use generics for multiple event channels.
+func HandleAllEventChan(ctx context.Context, uniV2PairSyncChan <-chan *UniswapV2Pair.UniswapV2PairSync) error {
+	for {
+		select {
+		case e := <-uniV2PairSyncChan:
+			fmt.Printf("[%s] EVENT: Received UniswapV2PairSyncEvent: reserve0: %s: reserve1: %s\n", time.Now().Format(time.RFC3339), e.Reserve0, e.Reserve1)
+			// Do something
+
+		// NOTE: You can handle every event like below.
+		// case e := <-uniV2PairSwapChan:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 func pairFetcher() {
 	startTime := time.Now()
 
-	fmt.Println("RPC: ", getENV("RPC_HTTP"))
-	client, err := ethclient.Dial(getENV("RPC_HTTP"))
+	fmt.Println("RPC: ", os.Getenv("RPC_HTTP"))
+	client, err := ethclient.Dial(os.Getenv("RPC_HTTP"))
 
 	if err != nil {
 		log.Fatal(err)
 	}
 	_ = client
-
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
-		Password: "",
-		DB:       0,
-	})
-	_ = rdb
 
 	dex := getDex(0)
 	_ = dex
